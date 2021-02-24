@@ -3,9 +3,11 @@ import matplotlib.pyplot as plt
 
 
 class DecisionTree():
-    def __init__(self, split_minimum=2, depth_maximum=100):
+    def __init__(self, split_minimum=2, depth_maximum=100, _lambda=0.1, gamma=0.1):
         self.split_minimum = split_minimum
         self.depth_maximum = depth_maximum
+        self._lambda = _lambda
+        self.gamma = gamma
 
 
     def tree_arrangement(self, inputs, node):
@@ -16,49 +18,33 @@ class DecisionTree():
         return self.tree_arrangement(inputs, node.right)
 
 
-    def entropy(self, target):
-        _, hist = np.unique(target, return_counts=True)
-        p = hist / len(target)
-        return -np.sum(p * np.log2(p))
-
-
     def tree_growth(self, inputs, target, depth=0):
         samples = inputs.shape[0]
         if depth >= self.depth_maximum or samples < self.split_minimum:
             return Tree_Node(val=np.mean(target))
 
         thresholds = np.unique(inputs)
-        best_gain = -1
+        best_variance = 1000
         for th in thresholds:
             idx_left = np.where(inputs <= th)
             idx_right = np.where(inputs > th)
             if len(idx_left) == 0 or len(idx_right) == 0:
-                gain = 0
+                variance = 999
             else:
-                # ジニ係数という分割基準を計算する
-                # 分類問題
-                # p1_node1, p2_node1 = probability(target[idx_left])
-                # p1_node2, p2_node2 = probability(target[idx_right])
-                # sample_sum_node1, sample_sum_node2 = len(idx_left), len(idx_right)
-                # gini_node1 = 1 - p1_node1**2 - p2_node1**2
-                # gini_node2 = 1 - p1_node2**2 - p2_node2**2
-                # gain = weighted_average_gini = gini_node1*(sample_sum_node1 / samples) \
-                #     + gini_node2 * (sample_sum_node2 / samples)
-
-                # 回帰問題
-                original_entropy = self.entropy(target)
-                e_left = self.entropy(target[idx_left])
-                e_right = self.entropy(target[idx_right])
-                n_left, n_right = len(idx_left), len(idx_right)
-                weighted_average_entropy = e_left * (n_left / samples) + e_right * (n_right / samples)
-                gain = original_entropy - weighted_average_entropy
-            if gain > best_gain:
+                var_left = np.sqrt(np.sum((target[idx_left] - target[idx_left].mean())**2) / (
+                    target[idx_left].shape[0] + self._lambda))
+                var_right = np.sqrt(np.sum((target[idx_right] - target[idx_right].mean())**2) / (
+                    target[idx_right].shape[0] + self._lambda))
+                variance = (var_left + target[idx_left].shape[0]*self.gamma + \
+                            var_right + target[idx_right].shape[0]*self.gamma) / 2
+            if variance < best_variance:
                 index_left = idx_left
                 index_right = idx_right
-                best_gain = gain
+                best_variance = variance
                 threshhold_best = th
 
-        if best_gain == 0:
+
+        if best_variance == 999:
             return Tree_Node(val=np.mean(target))
 
         left_node = self.tree_growth(inputs[index_left], target[index_left], depth+1)
@@ -82,30 +68,48 @@ class Tree_Node():
         self.val = val
 
 
-class RandomForest():
-    def __init__(self, t_numbers=10, split_minimum=5, depth_maximum=100):
+class XGBoost:
+    def __init__(self, t_numbers=5, depth_maximum=3, alpha=1, bagFraction=0.8, _lambda=0.1, gamma=0.1):
         self.t_numbers = t_numbers
-        self.split_minimum = split_minimum
         self.depth_maximum = depth_maximum
+        self.alpha = alpha
+        self.bagFraction = bagFraction
+        self._lambda = _lambda
+        self.gamma = gamma
 
 
-    def fit(self, inputs, target, node_num=10):
+    def fit(self, inputs, target):
         self.use_trees = []
-        for  _ in range(self.t_numbers):
-            tree = DecisionTree(self.split_minimum, self.depth_maximum)
-            x_samp, y_samp = self.sampling_bootstrap(inputs, target, node_num)
-            tree.fit(x_samp, y_samp)
+        tree = DecisionTree(
+            depth_maximum=self.depth_maximum, _lambda=self._lambda, gamma=self.gamma)
+        tree.fit(inputs, target)
+        # 初期F0(x)の算出
+        F0 = tree.predict(inputs)
+        gradient = self.alpha * (target - F0)
+        Fm = F0
+        self.use_trees.append(tree)
+        for i in range(self.t_numbers - 1):
+            if self.bagFraction < 1.0:
+                baggings = int(round(inputs.shape[0] * self.bagFraction))
+                idx = np.random.choice(range(inputs.shape[0]), baggings, replace=False)
+                x = inputs[idx]
+                y = gradient[idx]
+            else:
+                x = inputs
+                y = gradient
+            tree = DecisionTree(
+                depth_maximum=self.depth_maximum, _lambda=self._lambda, gamma=self.gamma)
+            tree.fit(x, y)
+            # 式(45)の計算
+            Fm += tree.predict(inputs)
+            # 式(43)の計算
+            gradient = self.alpha * (target - Fm)
             self.use_trees.append(tree)
 
 
     def predict(self, inputs):
-        predicts = np.array([tree.predict(inputs) for tree in self.use_trees])
-        return np.mean(predicts, axis=0)
-
-
-    def sampling_bootstrap(self, inputs, target, node_num):
-        idx = np.random.choice(inputs.shape[0], node_num, replace=True)
-        return inputs[idx], target[idx]
+        predicts = [tree.predict(inputs) for tree in self.use_trees]
+        return np.sum(predicts, axis=0)
 
 
 def main():
@@ -115,13 +119,13 @@ def main():
     target = np.array([62.0, 60.0, 83.0, 120.0, 158.0, 172.0,
                        167.0, 204.0, 189.0, 140.0, 166.0])
 
-    plf = RandomForest(t_numbers=3, depth_maximum=2)
+    plf = XGBoost(t_numbers=5, depth_maximum=3, _lambda=0, gamma=0)
     plf.fit(inputs, target)
     y_pred = plf.predict(inputs)
     print(y_pred)
     plt.scatter(inputs, target, label='data')
     plt.step(inputs, y_pred, color='orange', label='prediction')
-    plt.ylim(10, 210)
+    plt.ylim(10,210)
     plt.legend()
     plt.show()
 
